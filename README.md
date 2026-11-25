@@ -55,3 +55,4 @@ open dist/RedNoteLite.app
 | `⌘⇧H` | 立即休眠 / 唤醒网页视图 |
 | `⌘[` / `⌘]` / `⌘R` | 后退 / 前进 / 刷新 |
 # xiaohongshulite
+# xiaohongshulite
