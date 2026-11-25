@@ -64,6 +64,9 @@ final class AppState: ObservableObject {
         self.webManager.onPageSnapshot = { [weak self] snapshot in
             self?.handlePageSnapshot(snapshot)
         }
+        self.webManager.onCloudCollectChanged = { [weak self] snapshot, collected in
+            self?.handleCloudCollectChanged(snapshot: snapshot, collected: collected)
+        }
 
         webManager.$currentURL
             .receive(on: RunLoop.main)
@@ -171,11 +174,17 @@ final class AppState: ObservableObject {
         Task { @MainActor in
             let snap = await webManager.fetchLiveSnapshot()
             let key = XHSURLClassifier.canonicalKey(for: snap.url)
-            if database.isCollected(urlString: snap.url) {
+            let willCollect = !database.isCollected(urlString: snap.url)
+
+            // Sync with Xiaohongshu cloud collect button if viewing a note detail
+            let cloudStatus = await webManager.syncCloudCollect(desiredCollected: willCollect)
+            let syncedCloud = (cloudStatus == "clicked" || cloudStatus == "already_synced")
+
+            if !willCollect {
                 try? database.deleteCollection(id: key)
                 isCurrentPageCollected = false
                 reloadCollections()
-                webManager.showToast("已从本地收藏夹移除")
+                webManager.showToast(syncedCloud ? "已取消小红书云端与本地收藏" : "已从本地收藏夹移除")
             } else {
                 _ = try? database.upsertCollection(
                     url: snap.url,
@@ -188,8 +197,62 @@ final class AppState: ObservableObject {
                 )
                 isCurrentPageCollected = true
                 reloadCollections()
-                webManager.showToast("已保存到本地收藏夹")
+                webManager.showToast(syncedCloud ? "已同步小红书云端收藏并保存到本地" : "已保存到本地收藏夹")
             }
+        }
+    }
+
+    private func handleCloudCollectChanged(snapshot: CurrentPageSnapshot, collected: Bool) {
+        let key = XHSURLClassifier.canonicalKey(for: snapshot.url)
+        if collected {
+            _ = try? database.upsertCollection(
+                url: snapshot.url,
+                noteId: snapshot.noteId,
+                title: snapshot.title.isEmpty ? webManager.pageTitle : snapshot.title,
+                author: snapshot.author,
+                coverURL: snapshot.coverURL,
+                excerpt: snapshot.excerpt,
+                folder: "云端同步"
+            )
+            isCurrentPageCollected = true
+            reloadCollections()
+            webManager.showToast("已同步云端收藏到本地")
+        } else if database.isCollected(urlString: snapshot.url) {
+            try? database.deleteCollection(id: key)
+            isCurrentPageCollected = false
+            reloadCollections()
+            webManager.showToast("已同步取消本地收藏")
+        }
+    }
+
+    func openCloudCollections() {
+        mainPane = .web
+        webManager.openCloudCollections()
+    }
+
+    func importVisibleCloudCollections() {
+        Task { @MainActor in
+            let notes = await webManager.extractVisibleCloudNotes()
+            guard !notes.isEmpty else {
+                webManager.showToast("当前页未检测到可导入的云端收藏卡片")
+                return
+            }
+            var count = 0
+            for note in notes {
+                if (try? database.upsertCollection(
+                    url: note.url,
+                    noteId: note.noteId,
+                    title: note.title,
+                    author: note.author,
+                    coverURL: note.coverURL,
+                    excerpt: note.excerpt,
+                    folder: "云端同步"
+                )) != nil {
+                    count += 1
+                }
+            }
+            reloadCollections()
+            webManager.showToast("已同步 \(count) 条云端收藏到本地「云端同步」")
         }
     }
 

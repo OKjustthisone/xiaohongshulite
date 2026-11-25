@@ -557,8 +557,8 @@ struct SettingsPaneView: View {
                     }
                 }
 
-                settingsCard(title: "全屏帖子与手势说明") {
-                    Text("• 点击任意帖子自动全屏展开正文与评论（无浮窗遮罩）。\n• 触控板双指右滑、鼠标从左侧边缘右拉、点击顶部「‹ 返回」或按 ESC 键，均可即时返回信息流原位置。\n• 自动跟随 macOS 系统浅色 / 深色外观切换。")
+                settingsCard(title: "全屏帖子、手势与云端收藏说明") {
+                    Text("• 点击任意帖子自动全屏展开正文与评论（无浮窗遮罩）。\n• 返回方式：右侧文字/评论区空白处点击鼠标右键、触控板双指右拉、鼠标左边缘右拉、顶部「‹ 返回」或按 ESC 键（图片区域、输入框与划选文字仍保留原生右键菜单）。\n• 云端收藏同步：点击顶部「收藏」(⌘D) 或帖子内小红书星标，均自动双向同步云端与本地收藏夹；在「收藏夹」点「查看云端收藏」还可一键将云端已有收藏批量导入本地。")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

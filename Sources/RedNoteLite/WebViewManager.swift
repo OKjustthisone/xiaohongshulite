@@ -39,6 +39,7 @@ final class WebViewManager: NSObject, ObservableObject {
     @Published var toastMessage: String?
 
     var onPageSnapshot: ((CurrentPageSnapshot) -> Void)?
+    var onCloudCollectChanged: ((CurrentPageSnapshot, Bool) -> Void)?
 
     var activeWebView: SwipeBackWebView? {
         if activeSection == .explore {
@@ -53,6 +54,7 @@ final class WebViewManager: NSObject, ObservableObject {
     private var lastSecondaryURL: URL?
     private var secondaryLoadedSection: NavSection?
     private var pendingExploreChannel: ExploreChannel?
+    private var pendingOpenCloudCollectionsTab: Bool = false
 
     // Per-WebView cached state so switching tabs never loses state or triggers reloads
     private var exploreSnapshot = CurrentPageSnapshot(url: NavSection.explore.targetURL.absoluteString)
@@ -427,7 +429,7 @@ final class WebViewManager: NSObject, ObservableObject {
                         // Not logged in yet — stay on Explore and open login dialog if available
                         self.activeSection = .explore
                         self.syncPublishedStateFromActiveWebView()
-                        explore.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.openUserProfile();", completionHandler: nil)
+                        _ = try? await explore.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.openUserProfile();")
                         self.showToast("请先登录小红书账号以访问个人主页")
                     }
                 }
@@ -598,6 +600,70 @@ final class WebViewManager: NSObject, ObservableObject {
         return currentSnapshot
     }
 
+    /// Triggers Xiaohongshu's native in-page cloud collect button so cloud & local stay in sync.
+    func syncCloudCollect(desiredCollected: Bool) async -> String {
+        guard let wv = activeWebView, !isHibernated else { return "not_found" }
+        let flag = desiredCollected ? "true" : "false"
+        do {
+            let result = try await wv.evaluateJavaScript(
+                "window.__rednoteLite ? window.__rednoteLite.toggleCloudCollect(\(flag)) : null"
+            )
+            if let dict = result as? [String: Any], let status = dict["status"] as? String {
+                return status
+            }
+        } catch {}
+        return "not_found"
+    }
+
+    /// Opens the user's official Xiaohongshu profile Cloud Collections tab in the secondary WebView
+    /// (keeping Discover feed untouched).
+    func openCloudCollections() {
+        pendingOpenCloudCollectionsTab = true
+        pauseMedia(in: exploreWebView)
+        isHibernated = false
+        activeSection = .profile
+
+        if let secondary = secondaryWebView,
+           secondaryLoadedSection == .profile,
+           let urlStr = secondary.url?.absoluteString,
+           urlStr.contains("/user/profile/") {
+            syncPublishedStateFromActiveWebView()
+            secondary.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.openCloudCollectionsTab();", completionHandler: nil)
+            pendingOpenCloudCollectionsTab = false
+            return
+        }
+
+        openProfileInSecondary()
+    }
+
+    /// Extracts visible note cards from the currently displayed page (e.g., user's Cloud Collections tab)
+    /// for one-click batch import into local SQLite.
+    func extractVisibleCloudNotes() async -> [CurrentPageSnapshot] {
+        guard let wv = activeWebView, !isHibernated else { return [] }
+        do {
+            let result = try await wv.evaluateJavaScript("window.__rednoteLite ? window.__rednoteLite.extractVisibleNotes() : []")
+            guard let list = result as? [[String: Any]] else { return [] }
+            return list.compactMap { item in
+                guard let url = item["url"] as? String, !url.isEmpty else { return nil }
+                let noteId = item["noteId"] as? String
+                let title = (item["title"] as? String) ?? ""
+                let author = (item["author"] as? String) ?? ""
+                let cover = (item["coverURL"] as? String) ?? ""
+                return CurrentPageSnapshot(
+                    url: url,
+                    noteId: noteId,
+                    title: title,
+                    author: author,
+                    coverURL: cover.isEmpty ? nil : cover,
+                    excerpt: "",
+                    isNoteDetail: false
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+
     /// Releases non-session caches & trims DOM video buffers without logging out the user.
     func purgeMemory(deepReset: Bool = false) async {
         URLCache.shared.removeAllCachedResponses()
@@ -680,27 +746,46 @@ extension WebViewManager: WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "rednoteBridge",
               let body = message.body as? [String: Any],
-              (body["type"] as? String) == "pageSnapshot",
-              let snap = parseSnapshot(body) else {
+              let msgType = body["type"] as? String else {
             return
         }
-        let fromExplore = (message.webView === exploreWebView)
-        if fromExplore {
-            exploreSnapshot = snap
-            exploreIsInDetail = snap.isNoteDetail
-        } else {
-            secondarySnapshot = snap
-            secondaryIsInDetail = snap.isNoteDetail
-        }
-        if isViewActive(isExplore: fromExplore) {
-            currentSnapshot = snap
-            currentURL = snap.url
-            isInNoteDetail = snap.isNoteDetail
-            if !snap.title.isEmpty {
-                pageTitle = snap.title
+
+        switch msgType {
+        case "rightClickBack":
+            if message.webView === activeWebView {
+                goBackFromNote()
             }
+
+        case "cloudCollectChanged":
+            if let snapDict = body["snapshot"] as? [String: Any],
+               let snap = parseSnapshot(snapDict),
+               let collected = body["collected"] as? Bool {
+                onCloudCollectChanged?(snap, collected)
+            }
+
+        case "pageSnapshot":
+            guard let snap = parseSnapshot(body) else { return }
+            let fromExplore = (message.webView === exploreWebView)
+            if fromExplore {
+                exploreSnapshot = snap
+                exploreIsInDetail = snap.isNoteDetail
+            } else {
+                secondarySnapshot = snap
+                secondaryIsInDetail = snap.isNoteDetail
+            }
+            if isViewActive(isExplore: fromExplore) {
+                currentSnapshot = snap
+                currentURL = snap.url
+                isInNoteDetail = snap.isNoteDetail
+                if !snap.title.isEmpty {
+                    pageTitle = snap.title
+                }
+            }
+            onPageSnapshot?(snap)
+
+        default:
+            break
         }
-        onPageSnapshot?(snap)
     }
 }
 
@@ -744,6 +829,16 @@ extension WebViewManager: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         applyWebPreferences(to: webView)
         webView.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.reportNow();", completionHandler: nil)
+
+        if webView === secondaryWebView && pendingOpenCloudCollectionsTab {
+            pendingOpenCloudCollectionsTab = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak webView] in
+                webView?.evaluateJavaScript(
+                    "window.__rednoteLite && window.__rednoteLite.openCloudCollectionsTab();",
+                    completionHandler: nil
+                )
+            }
+        }
 
         // If returning from a topic channel to a specific official channel, confirm the channel tab is clicked
         if webView === exploreWebView, let pending = pendingExploreChannel, !pending.isTopicChannel {

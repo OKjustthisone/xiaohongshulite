@@ -517,6 +517,145 @@ enum WebScripts {
             return "standalone";
         }
 
+        // MARK: - Cloud Collection Sync Helpers
+
+        let suppressPassiveCollectUntil = 0;
+
+        function findCollectButton() {
+            const root = document.querySelector("#noteContainer, .note-detail-mask, .interaction-container") || document;
+            const selectors = [
+                ".engage-bar-container .collect-wrapper",
+                ".interact-container .collect-wrapper",
+                "#note-page-collect-board-guide",
+                ".collect-wrapper",
+                '[class*="collect-wrapper"]'
+            ];
+            for (const sel of selectors) {
+                const el = root.querySelector(sel);
+                if (el) return el;
+            }
+            return null;
+        }
+
+        function isElementCollected(wrapper) {
+            if (!wrapper) return false;
+            const cls = (wrapper.className || "").toString().toLowerCase();
+            if (cls.includes("active") || cls.includes("collected")) return true;
+            if (wrapper.querySelector(".active, .collected, [class*='collected']")) return true;
+            const useEl = wrapper.querySelector("use");
+            if (useEl) {
+                const href = (useEl.getAttribute("xlink:href") || useEl.getAttribute("href") || "").toLowerCase();
+                if (href.includes("collected") || href.includes("star-fill") || href.includes("collect_fill")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function toggleCloudCollect(desiredCollected) {
+            const btn = findCollectButton();
+            if (!btn) {
+                return { status: "not_found", cloudCollected: false };
+            }
+            const currentlyCollected = isElementCollected(btn);
+            const target = typeof desiredCollected === "boolean" ? desiredCollected : !currentlyCollected;
+            if (currentlyCollected === target) {
+                return { status: "already_synced", cloudCollected: currentlyCollected };
+            }
+            suppressPassiveCollectUntil = Date.now() + 900;
+            const clickTarget = btn.querySelector("svg, .reds-icon, span") || btn;
+            clickTarget.click();
+            return { status: "clicked", cloudCollected: target };
+        }
+
+        function openCloudCollectionsTab() {
+            const tabs = document.querySelectorAll(".reds-tab-item, .tab-item, [class*='tab-item'], [role='tab']");
+            for (const tab of tabs) {
+                const text = (tab.textContent || "").trim();
+                if (text === "收藏" || text.startsWith("收藏")) {
+                    tab.click();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function extractVisibleNotes() {
+            const cards = document.querySelectorAll("section.note-item, .feeds-container section");
+            const items = [];
+            const seen = new Set();
+            cards.forEach((card) => {
+                const link = card.querySelector('a[href*="/explore/"], a[href*="/discovery/item/"], a.cover, a[href*="/user/profile/"]');
+                if (!link || !link.href) return;
+                const url = link.href;
+                const noteId = extractNoteId(url);
+                if (!noteId || seen.has(noteId)) return;
+                seen.add(noteId);
+
+                const titleEl = card.querySelector(".title span, .title, .footer .title");
+                const authorEl = card.querySelector(".author .name, .author-wrapper .name, .name");
+                const imgEl = card.querySelector("img");
+                const title = (titleEl ? titleEl.textContent : "").trim();
+                const author = (authorEl ? authorEl.textContent : "").trim();
+                const coverURL = imgEl ? (imgEl.currentSrc || imgEl.getAttribute("src") || "") : "";
+
+                items.push({
+                    url,
+                    noteId,
+                    title: title || ("笔记 " + noteId.slice(0, 8)),
+                    author,
+                    coverURL
+                });
+            });
+            return items;
+        }
+
+        // Right-click outside media/input/selection inside a note detail immediately goes back
+        document.addEventListener("contextmenu", (e) => {
+            const inNoteDetail = isModalOpen() || !!extractNoteId(window.location.href) || !!document.querySelector("#noteContainer");
+            if (!inNoteDetail) return;
+
+            const target = e.target;
+            if (!(target instanceof Element)) return;
+
+            // Keep native right-click menu on images/videos/media gallery
+            if (target.closest(".media-container, .slider-container, .swiper, img, video, canvas, picture")) {
+                return;
+            }
+            // Keep native right-click menu in editable inputs (paste, etc.)
+            if (target.closest('input, textarea, [contenteditable="true"]')) {
+                return;
+            }
+            // Keep native right-click menu if the user has selected text to copy
+            const sel = window.getSelection && window.getSelection().toString().trim();
+            if (sel && sel.length > 0) {
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+            post({ type: "rightClickBack" });
+        }, true);
+
+        // Passive listener: clicking Xiaohongshu's in-page star icon also syncs to local collections
+        document.addEventListener("click", (e) => {
+            if (Date.now() < suppressPassiveCollectUntil) return;
+            const target = e.target;
+            if (!(target instanceof Element)) return;
+            const wrapper = target.closest('.collect-wrapper, #note-page-collect-board-guide, [class*="collect-wrapper"]');
+            if (!wrapper) return;
+
+            setTimeout(() => {
+                const freshBtn = findCollectButton() || wrapper;
+                const collected = isElementCollected(freshBtn);
+                post({
+                    type: "cloudCollectChanged",
+                    collected: collected,
+                    snapshot: collectSnapshot()
+                });
+            }, 450);
+        }, true);
+
         // Hook SPA history transitions
         const origPushState = history.pushState;
         history.pushState = function() {
@@ -553,7 +692,10 @@ enum WebScripts {
             getUserProfileURL,
             openUserProfile,
             selectChannel,
-            closeNoteDetail
+            closeNoteDetail,
+            toggleCloudCollect,
+            openCloudCollectionsTab,
+            extractVisibleNotes
         };
 
         applyEcoMode(ecoEnabled, blockAutoplay);

@@ -425,14 +425,14 @@ struct ContentView: View {
             .background(Color.primary.opacity(0.08), in: Capsule())
         }
         .buttonStyle(.plain)
-        .help("返回列表（支持双指右拉或按 ESC）")
+        .help("返回列表（支持双指右拉、右侧空白处右键或按 ESC）")
 
         VStack(alignment: .leading, spacing: 1) {
             Text(webManager.currentSnapshot.title.isEmpty ? webManager.pageTitle : webManager.currentSnapshot.title)
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
             if !webManager.currentSnapshot.author.isEmpty {
-                Text("@\(webManager.currentSnapshot.author) · 右拉返回")
+                Text("@\(webManager.currentSnapshot.author) · 右拉 / 右键返回")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -469,7 +469,7 @@ struct ContentView: View {
                 .foregroundStyle(state.isCurrentPageCollected ? xhsRed : .primary)
             }
             .buttonStyle(.plain)
-            .help("保存到本地收藏夹 (⌘D)")
+            .help("同步小红书云端收藏并保存到本地 (⌘D)")
 
             Button {
                 state.copyCurrentURL()
@@ -541,6 +541,28 @@ struct ContentView: View {
 
         Spacer()
 
+        if webManager.activeSection == .profile {
+            Button {
+                state.openCloudCollections()
+            } label: {
+                Label("云端收藏", systemImage: "icloud")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Button {
+                state.importVisibleCloudCollections()
+            } label: {
+                Label("同步本页到本地", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(xhsRed)
+            .controlSize(.small)
+            .help("把当前页面显示的云端收藏卡片批量导入到本地收藏夹")
+        }
+
         Button {
             webManager.reload()
         } label: {
@@ -557,9 +579,19 @@ struct ContentView: View {
     private var nativePaneHeaderContent: some View {
         switch state.mainPane {
         case .collections:
-            Text("本地收藏夹")
+            Text("收藏夹（云端双向同步）")
                 .font(.system(size: 14, weight: .semibold))
             Spacer()
+            Button {
+                state.openCloudCollections()
+            } label: {
+                Label("查看云端收藏", systemImage: "icloud")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("打开小红书账号云端收藏页，支持一键同步到本地")
+
             Button {
                 state.toggleCollectCurrentPage()
             } label: {
