@@ -332,6 +332,12 @@ struct ContentView: View {
                 .opacity(state.mainPane == .web ? 1 : 0)
                 .allowsHitTesting(state.mainPane == .web)
 
+                // Native cold-launch waterfall skeleton (fades out the instant first feed cards paint)
+                if state.mainPane == .web && webManager.activeSection == .explore && webManager.isInitialColdLoading && !webManager.isHibernated {
+                    coldStartSkeletonView
+                        .transition(.opacity)
+                }
+
                 // Swipe-Right-to-Go-Back Native Edge Indicator
                 if state.mainPane == .web && webManager.swipeBackProgress > 0.03 {
                     swipeBackOverlay
@@ -365,6 +371,7 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.18), value: webManager.toastMessage)
+            .animation(.easeOut(duration: 0.22), value: webManager.isInitialColdLoading)
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -670,6 +677,35 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
         .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.85), value: p)
+    }
+
+    // MARK: - Cold-Start Native Waterfall Skeleton
+
+    private var coldStartSkeletonView: some View {
+        let heights: [CGFloat] = [210, 260, 190, 240, 225, 250, 200, 230, 195, 255]
+        return ScrollView(showsIndicators: false) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 185, maximum: 240), spacing: 16)],
+                spacing: 18
+            ) {
+                ForEach(0..<10, id: \.self) { idx in
+                    VStack(alignment: .leading, spacing: 8) {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.secondary.opacity(0.11))
+                            .frame(height: heights[idx % heights.count])
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.12))
+                            .frame(height: 12)
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.08))
+                            .frame(width: 96, height: 10)
+                    }
+                }
+            }
+            .padding(18)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .allowsHitTesting(false)
     }
 
     // MARK: - Hibernated Placeholder

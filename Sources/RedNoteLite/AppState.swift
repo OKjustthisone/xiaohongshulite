@@ -54,13 +54,15 @@ final class AppState: ObservableObject {
         self.preferencesStore = prefStore
         self.preferences = prefs
 
+        // Kick off WebView networking FIRST so cold page load starts immediately on frame 0
+        self.webManager = WebViewManager(preferences: prefs)
+
         do {
             self.database = try DatabaseStore()
         } catch {
             self.database = try! DatabaseStore(path: ":memory:")
         }
 
-        self.webManager = WebViewManager(preferences: prefs)
         self.webManager.onPageSnapshot = { [weak self] snapshot in
             self?.handlePageSnapshot(snapshot)
         }
@@ -76,9 +78,12 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
 
-        reloadHistory()
-        reloadCollections()
-        refreshMemorySnapshot()
+        // Defer initial SQLite reads & memory sampling off the critical launch frame
+        Task { @MainActor [weak self] in
+            self?.reloadHistory()
+            self?.reloadCollections()
+            self?.refreshMemorySnapshot()
+        }
         startLightweightMemoryPolling()
     }
 

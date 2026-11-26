@@ -31,6 +31,7 @@ final class WebViewManager: NSObject, ObservableObject {
     @Published var canGoBack: Bool = false
     @Published var canGoForward: Bool = false
     @Published var isLoading: Bool = false
+    @Published var isInitialColdLoading: Bool = true
     @Published var estimatedProgress: Double = 0
     @Published var isHibernated: Bool = false
     @Published var activeSection: NavSection = .explore
@@ -55,6 +56,8 @@ final class WebViewManager: NSObject, ObservableObject {
     private var secondaryLoadedSection: NavSection?
     private var pendingExploreChannel: ExploreChannel?
     private var pendingOpenCloudCollectionsTab: Bool = false
+    private var switchSequenceToken: Int = 0
+    private var telemetryRuleList: WKContentRuleList?
 
     // Per-WebView cached state so switching tabs never loses state or triggers reloads
     private var exploreSnapshot = CurrentPageSnapshot(url: NavSection.explore.targetURL.absoluteString)
@@ -70,8 +73,50 @@ final class WebViewManager: NSObject, ObservableObject {
     init(preferences: AppPreferences) {
         self.preferences = preferences
         super.init()
+        // Keep persistent HTTP cache on SSD so Xiaohongshu's ~6 MB versioned JS/CSS bundles
+        // load in milliseconds on subsequent cold starts (cleared on manual cache purge)
+        URLCache.shared = URLCache(memoryCapacity: 16 * 1024 * 1024, diskCapacity: 80 * 1024 * 1024)
         self.isDarkAppearance = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         setupExploreWebView(loading: NavSection.explore.targetURL)
+        prepareTelemetryBlocker()
+        // Safety cap: never keep launch skeleton up longer than 2.8s even on slow networks
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) { [weak self] in
+            self?.isInitialColdLoading = false
+        }
+    }
+
+    /// Compiles/loads a native WebKit ContentRuleList blocking pure telemetry & survey beacons
+    /// (apm-fe, t2 collect, sem_sdk, xhs_pc_nps, racing_report). Cuts ~1s & 15+ junk requests on startup
+    /// without affecting auth, feeds, comments, collects, or chat.
+    private func prepareTelemetryBlocker() {
+        let id = "rednoteTelemetryBlockerV1"
+        let rulesJSON = """
+        [
+          {"trigger":{"url-filter":".*apm-fe\\\\.xiaohongshu\\\\.com.*"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":".*t2\\\\.xiaohongshu\\\\.com.*"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":".*pages\\\\.xiaohongshu\\\\.com/data/sem_sdk.*"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":".*pages\\\\.xiaohongshu\\\\.com/data/xhs_pc_nps.*"},"action":{"type":"block"}},
+          {"trigger":{"url-filter":".*edith\\\\.xiaohongshu\\\\.com/api/sns/web/racing_report.*"},"action":{"type":"block"}}
+        ]
+        """
+        guard let store = WKContentRuleListStore.default() else { return }
+        store.lookUpContentRuleList(forIdentifier: id) { [weak self] existing, _ in
+            if let existing {
+                Task { @MainActor in self?.attachTelemetryBlocker(existing) }
+                return
+            }
+            store.compileContentRuleList(forIdentifier: id, encodedContentRuleList: rulesJSON) { [weak self] compiled, _ in
+                if let compiled {
+                    Task { @MainActor in self?.attachTelemetryBlocker(compiled) }
+                }
+            }
+        }
+    }
+
+    private func attachTelemetryBlocker(_ list: WKContentRuleList) {
+        telemetryRuleList = list
+        exploreWebView?.configuration.userContentController.add(list)
+        secondaryWebView?.configuration.userContentController.add(list)
     }
 
     func updatePreferences(_ newPrefs: AppPreferences) {
@@ -125,6 +170,9 @@ final class WebViewManager: NSObject, ObservableObject {
             forMainFrameOnly: true
         ))
         contentController.add(WeakScriptMessageHandler(delegate: self), name: "rednoteBridge")
+        if let telemetryRuleList {
+            contentController.add(telemetryRuleList)
+        }
         config.userContentController = contentController
 
         let wv = SwipeBackWebView(frame: .zero, configuration: config)
@@ -451,6 +499,8 @@ final class WebViewManager: NSObject, ObservableObject {
         exploreIsInDetail = false
         isInNoteDetail = false
         pendingExploreChannel = nil
+        switchSequenceToken += 1
+        let myToken = switchSequenceToken
 
         if isHibernated || exploreWebView == nil {
             if !channel.isTopicChannel {
@@ -461,44 +511,76 @@ final class WebViewManager: NSObject, ObservableObject {
             return
         }
 
+        let currentExploreURL = exploreWebView?.url?.absoluteString ?? ""
+        let isOnXHS = currentExploreURL.contains("www.xiaohongshu.com")
+
         if channel.isTopicChannel {
-            // Custom topic channels (上海, 科技, 数码, AI, 财经, 育儿) load /search_result/?keyword=...&type=51
-            loadInExplore(url: channel.url, ignoreCache: true)
+            // Clicking the currently active topic tag manually refreshes it
+            if wasSameChannel && currentExploreURL.contains("/search_result") {
+                exploreWebView?.reload()
+                syncPublishedStateFromActiveWebView()
+                return
+            }
+
+            // Fast path: switch topic IN-PLACE inside the running Vue SPA (~250ms, zero 6 MB JS reload!)
+            if isOnXHS {
+                runSPASearchWithFallback(keyword: channel.title, fallbackURL: channel.url, token: myToken)
+            } else {
+                loadInExplore(url: channel.url, ignoreCache: false)
+            }
             syncPublishedStateFromActiveWebView()
             return
         }
 
         // Official Explore channels (推荐, 穿搭, 美食, ...)
-        let currentExploreURL = exploreWebView?.url?.absoluteString ?? ""
         let isCurrentlyOnExploreFeed = currentExploreURL.contains("/explore") && !currentExploreURL.contains("/search_result")
 
         if wasSameChannel && isCurrentlyOnExploreFeed {
-            // Clicking the currently active channel tag refreshes it
             exploreWebView?.reload()
             syncPublishedStateFromActiveWebView()
             return
         }
 
-        if isCurrentlyOnExploreFeed {
-            let escapedId = channel.rawValue.replacingOccurrences(of: "'", with: "\\'")
-            let escapedTitle = channel.title.replacingOccurrences(of: "'", with: "\\'")
-            let js = "window.__rednoteLite ? window.__rednoteLite.selectChannel('\(escapedId)', '\(escapedTitle)') : false"
+        if isOnXHS {
+            let escapedId = jsEscape(channel.rawValue)
+            let escapedTitle = jsEscape(channel.title)
+            let js = "window.__rednoteLite ? window.__rednoteLite.navigateToExploreInSPA('\(escapedId)', '\(escapedTitle)') : 'no_router'"
             exploreWebView?.evaluateJavaScript(js) { [weak self] result, _ in
                 Task { @MainActor in
-                    guard let self else { return }
-                    let switched = (result as? Bool) ?? false
-                    if !switched {
+                    guard let self, self.switchSequenceToken == myToken else { return }
+                    let outcome = (result as? String) ?? "no_router"
+                    if outcome == "no_router" {
                         self.pendingExploreChannel = channel
-                        self.loadInExplore(url: channel.url, ignoreCache: true)
+                        self.loadInExplore(url: channel.url, ignoreCache: false)
                     }
                 }
             }
         } else {
-            // Returning from a topic channel (/search_result/) to an official channel (/explore?channel_id=...)
             pendingExploreChannel = channel
-            loadInExplore(url: channel.url, ignoreCache: true)
+            loadInExplore(url: channel.url, ignoreCache: false)
         }
         syncPublishedStateFromActiveWebView()
+    }
+
+    private func runSPASearchWithFallback(keyword: String, fallbackURL: URL, token: Int) {
+        let escapedKw = jsEscape(keyword)
+        let js = "window.__rednoteLite ? window.__rednoteLite.searchInSPA('\(escapedKw)') : 'no_router'"
+        exploreWebView?.evaluateJavaScript(js) { [weak self] result, _ in
+            Task { @MainActor in
+                guard let self, self.switchSequenceToken == token else { return }
+                let outcome = (result as? String) ?? "no_router"
+                if outcome != "router_pushed" {
+                    self.loadInExplore(url: fallbackURL, ignoreCache: false)
+                }
+            }
+        }
+    }
+
+    private func jsEscape(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
     }
 
     // MARK: - Full-Page Note Back Gesture, Search & Manual Reload
@@ -554,7 +636,15 @@ final class WebViewManager: NSObject, ObservableObject {
         activeSection = .explore
         exploreIsInDetail = false
         isInNoteDetail = false
-        loadInExplore(url: url, ignoreCache: true)
+        switchSequenceToken += 1
+        let myToken = switchSequenceToken
+
+        let currentExploreURL = exploreWebView?.url?.absoluteString ?? ""
+        if !isHibernated, exploreWebView != nil, currentExploreURL.contains("www.xiaohongshu.com") {
+            runSPASearchWithFallback(keyword: keyword, fallbackURL: url, token: myToken)
+        } else {
+            loadInExplore(url: url, ignoreCache: false)
+        }
         syncPublishedStateFromActiveWebView()
     }
 
@@ -751,6 +841,9 @@ extension WebViewManager: WKScriptMessageHandler {
         }
 
         switch msgType {
+        case "firstPaintReady":
+            isInitialColdLoading = false
+
         case "rightClickBack":
             if message.webView === activeWebView {
                 goBackFromNote()
@@ -827,6 +920,9 @@ extension WebViewManager: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if webView === exploreWebView {
+            isInitialColdLoading = false
+        }
         applyWebPreferences(to: webView)
         webView.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.reportNow();", completionHandler: nil)
 
