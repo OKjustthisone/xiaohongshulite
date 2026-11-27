@@ -781,14 +781,25 @@ enum WebScripts {
         }
 
         function openCloudCollectionsTab() {
-            const tabs = document.querySelectorAll(".reds-tab-item, .tab-item, [class*='tab-item'], [role='tab']");
-            for (const tab of tabs) {
-                const text = (tab.textContent || "").trim();
-                if (text === "收藏" || text.startsWith("收藏")) {
-                    tab.click();
-                    return true;
+            function tryClick() {
+                const tabs = document.querySelectorAll(".reds-tab-item, .tab-item, [class*='tab-item'], [role='tab']");
+                for (const tab of tabs) {
+                    const text = (tab.textContent || "").trim();
+                    if (text === "收藏" || text.startsWith("收藏")) {
+                        tab.click();
+                        return true;
+                    }
                 }
+                return false;
             }
+            if (tryClick()) return true;
+            let attempts = 0;
+            const poll = setInterval(() => {
+                attempts++;
+                if (tryClick() || attempts >= 25) {
+                    clearInterval(poll);
+                }
+            }, 80);
             return false;
         }
 

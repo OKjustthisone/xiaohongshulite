@@ -424,7 +424,12 @@ final class WebViewManager: NSObject, ObservableObject {
         activeSection = section
 
         if section == .profile {
-            openProfileInSecondary()
+            openProfileInSecondary(targetSection: .profile)
+            return
+        }
+
+        if section == .cloudCollections {
+            openCloudCollections()
             return
         }
 
@@ -447,13 +452,18 @@ final class WebViewManager: NSObject, ObservableObject {
         }
     }
 
-    private func openProfileInSecondary() {
+    private func openProfileInSecondary(targetSection: NavSection = .profile) {
         // If secondary is already showing user profile, just reveal without reloading
         if let secondary = secondaryWebView,
-           secondaryLoadedSection == .profile,
+           (secondaryLoadedSection == .profile || secondaryLoadedSection == .cloudCollections),
            let urlStr = secondary.url?.absoluteString,
            urlStr.contains("/user/profile/") {
+            secondaryLoadedSection = targetSection
             syncPublishedStateFromActiveWebView()
+            if targetSection == .cloudCollections {
+                secondary.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.openCloudCollectionsTab();", completionHandler: nil)
+                pendingOpenCloudCollectionsTab = false
+            }
             return
         }
 
@@ -464,21 +474,25 @@ final class WebViewManager: NSObject, ObservableObject {
                     guard let self else { return }
                     if let urlStr = result as? String, !urlStr.isEmpty, let profileURL = URL(string: urlStr) {
                         if let secondary = self.secondaryWebView {
-                            self.secondaryLoadedSection = .profile
+                            self.secondaryLoadedSection = targetSection
                             self.secondaryIsInDetail = false
                             secondary.stopLoading()
                             secondary.load(URLRequest(url: profileURL))
                             self.syncPublishedStateFromActiveWebView()
                         } else {
-                            self.setupSecondaryWebView(loading: profileURL, for: .profile)
+                            self.setupSecondaryWebView(loading: profileURL, for: targetSection)
                             self.syncPublishedStateFromActiveWebView()
                         }
                     } else {
                         // Not logged in yet — stay on Explore and open login dialog if available
+                        self.pendingOpenCloudCollectionsTab = false
                         self.activeSection = .explore
                         self.syncPublishedStateFromActiveWebView()
                         _ = try? await explore.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.openUserProfile();")
-                        self.showToast("请先登录小红书账号以访问个人主页")
+                        let hint = targetSection == .cloudCollections
+                            ? "请先登录小红书账号查看云端收藏，或切换「本地收藏」"
+                            : "请先登录小红书账号以访问个人主页"
+                        self.showToast(hint)
                     }
                 }
             }
@@ -711,19 +725,20 @@ final class WebViewManager: NSObject, ObservableObject {
         pendingOpenCloudCollectionsTab = true
         pauseMedia(in: exploreWebView)
         isHibernated = false
-        activeSection = .profile
+        activeSection = .cloudCollections
 
         if let secondary = secondaryWebView,
-           secondaryLoadedSection == .profile,
+           (secondaryLoadedSection == .profile || secondaryLoadedSection == .cloudCollections),
            let urlStr = secondary.url?.absoluteString,
            urlStr.contains("/user/profile/") {
+            secondaryLoadedSection = .cloudCollections
             syncPublishedStateFromActiveWebView()
             secondary.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.openCloudCollectionsTab();", completionHandler: nil)
             pendingOpenCloudCollectionsTab = false
             return
         }
 
-        openProfileInSecondary()
+        openProfileInSecondary(targetSection: .cloudCollections)
     }
 
     /// Extracts visible note cards from the currently displayed page (e.g., user's Cloud Collections tab)

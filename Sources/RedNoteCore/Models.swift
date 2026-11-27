@@ -62,6 +62,7 @@ public enum NavSection: String, CaseIterable, Identifiable, Sendable {
     case notifications
     case directMessages
     case profile
+    case cloudCollections
     case creatorCenter
 
     public var id: String { rawValue }
@@ -72,6 +73,7 @@ public enum NavSection: String, CaseIterable, Identifiable, Sendable {
         case .notifications: return "互动通知"
         case .directMessages: return "创作者私信"
         case .profile: return "我的主页"
+        case .cloudCollections: return "收藏"
         case .creatorCenter: return "创作中心"
         }
     }
@@ -82,6 +84,7 @@ public enum NavSection: String, CaseIterable, Identifiable, Sendable {
         case .notifications: return "bell"
         case .directMessages: return "bubble.left.and.bubble.right"
         case .profile: return "person.crop.circle"
+        case .cloudCollections: return "star.fill"
         case .creatorCenter: return "sparkles.rectangle.stack"
         }
     }
@@ -94,7 +97,7 @@ public enum NavSection: String, CaseIterable, Identifiable, Sendable {
             return URL(string: "https://www.xiaohongshu.com/notification")!
         case .directMessages:
             return URL(string: "https://creator.xiaohongshu.com/creator/chat")!
-        case .profile:
+        case .profile, .cloudCollections:
             return URL(string: "https://www.xiaohongshu.com/explore")!
         case .creatorCenter:
             return URL(string: "https://creator.xiaohongshu.com/new/home")!

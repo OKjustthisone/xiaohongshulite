@@ -102,10 +102,15 @@ struct RedNoteLiteApp: App {
                 }
                 .keyboardShortcut("d", modifiers: .command)
 
+                Button("收藏（小红书云端）") {
+                    appState.openCloudCollections()
+                }
+                .keyboardShortcut("b", modifiers: .command)
+
                 Button("本地收藏夹") {
                     appState.toggleMainPane(.collections)
                 }
-                .keyboardShortcut("b", modifiers: .command)
+                .keyboardShortcut("b", modifiers: [.command, .shift])
 
                 Button("浏览历史") {
                     appState.toggleMainPane(.history)
