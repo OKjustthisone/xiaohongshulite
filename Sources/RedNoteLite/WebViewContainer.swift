@@ -104,3 +104,47 @@ struct AsyncThumbnailView: View {
         }
     }
 }
+
+/// Waterfall card cover image that preserves the photo's natural aspect ratio (clamped between
+/// portrait 3:4 and landscape 4:3) just like Xiaohongshu's home waterfall grid.
+struct AsyncCoverImageView: View {
+    let urlString: String?
+    var cornerRadius: CGFloat = 12
+    @State private var image: NSImage?
+
+    private var clampedAspectRatio: CGFloat {
+        guard let image, image.size.height > 0 else { return 0.8 } // Default 4:5 portrait ratio
+        let ratio = image.size.width / image.size.height
+        return min(max(ratio, 0.72), 1.32)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.secondary.opacity(0.09)
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 26))
+                    .foregroundStyle(.secondary.opacity(0.45))
+            }
+        }
+        .aspectRatio(clampedAspectRatio, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .task(id: urlString) {
+            guard let urlString, !urlString.isEmpty else {
+                image = nil
+                return
+            }
+            if let cached = ThumbnailCache.shared.image(for: urlString) {
+                image = cached
+                return
+            }
+            image = await ThumbnailCache.shared.load(urlString: urlString, maxPixelSize: 520)
+        }
+    }
+}

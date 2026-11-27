@@ -65,6 +65,7 @@ struct RedNoteCoreTests {
             url: "https://www.xiaohongshu.com/explore/bbbbbbbbbbbbbbbbbbbbbbbb",
             title: "手冲咖啡技巧",
             author: "咖啡师",
+            isVideo: true,
             visitedAt: t3,
             maxItems: 2
         )
@@ -72,16 +73,19 @@ struct RedNoteCoreTests {
             url: "https://www.xiaohongshu.com/explore/cccccccccccccccccccccccc",
             title: "极简桌面改造",
             author: "效率控",
+            isVideo: false,
             visitedAt: t3.addingTimeInterval(50),
             maxItems: 2
         )
         all = try db.fetchHistory()
         #expect(all.count == 2)
         #expect(all.first?.title == "极简桌面改造")
+        #expect(all.first?.isVideo == false)
 
         let filtered = try db.fetchHistory(query: "咖啡")
         #expect(filtered.count == 1)
         #expect(filtered.first?.author == "咖啡师")
+        #expect(filtered.first?.isVideo == true)
 
         try db.clearHistory()
         #expect(try db.fetchHistory().isEmpty)

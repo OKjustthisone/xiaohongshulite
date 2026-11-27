@@ -69,6 +69,9 @@ final class AppState: ObservableObject {
         self.webManager.onCloudCollectChanged = { [weak self] snapshot, collected in
             self?.handleCloudCollectChanged(snapshot: snapshot, collected: collected)
         }
+        self.webManager.onReturnToNativePane = { [weak self] pane in
+            self?.mainPane = pane
+        }
 
         webManager.$currentURL
             .receive(on: RunLoop.main)
@@ -118,8 +121,9 @@ final class AppState: ObservableObject {
     }
 
     func openNoteURL(_ urlString: String) {
+        let originPane = mainPane
         mainPane = .web
-        webManager.openNoteFromLocal(urlString: urlString)
+        webManager.openNoteFromLocal(urlString: urlString, returnTo: originPane)
     }
 
     func toggleMainPane(_ pane: MainPaneMode) {
@@ -146,6 +150,7 @@ final class AppState: ObservableObject {
                 author: snapshot.author,
                 coverURL: snapshot.coverURL,
                 excerpt: snapshot.excerpt,
+                isVideo: snapshot.isVideo,
                 maxItems: preferences.maxHistoryItems
             )
             reloadHistory()
@@ -198,7 +203,8 @@ final class AppState: ObservableObject {
                     author: snap.author,
                     coverURL: snap.coverURL,
                     excerpt: snap.excerpt,
-                    folder: selectedFolder == "全部" ? "默认收藏" : selectedFolder
+                    folder: selectedFolder == "全部" ? "默认收藏" : selectedFolder,
+                    isVideo: snap.isVideo
                 )
                 isCurrentPageCollected = true
                 reloadCollections()
@@ -217,7 +223,8 @@ final class AppState: ObservableObject {
                 author: snapshot.author,
                 coverURL: snapshot.coverURL,
                 excerpt: snapshot.excerpt,
-                folder: "云端同步"
+                folder: "云端同步",
+                isVideo: snapshot.isVideo
             )
             isCurrentPageCollected = true
             reloadCollections()
@@ -251,7 +258,8 @@ final class AppState: ObservableObject {
                     author: note.author,
                     coverURL: note.coverURL,
                     excerpt: note.excerpt,
-                    folder: "云端同步"
+                    folder: "云端同步",
+                    isVideo: note.isVideo
                 )) != nil {
                     count += 1
                 }
@@ -269,7 +277,8 @@ final class AppState: ObservableObject {
             author: entry.author,
             coverURL: entry.coverURL,
             excerpt: entry.excerpt,
-            folder: "默认收藏"
+            folder: "默认收藏",
+            isVideo: entry.isVideo
         )
         reloadCollections()
         webManager.showToast("已加入本地收藏夹")

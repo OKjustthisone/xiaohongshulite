@@ -37,10 +37,12 @@ final class WebViewManager: NSObject, ObservableObject {
     @Published var activeSection: NavSection = .explore
     @Published var activeChannel: ExploreChannel = .recommend
     @Published var swipeBackProgress: CGFloat = 0
+    @Published var returnPaneOnExit: MainPaneMode?
     @Published var toastMessage: String?
 
     var onPageSnapshot: ((CurrentPageSnapshot) -> Void)?
     var onCloudCollectChanged: ((CurrentPageSnapshot, Bool) -> Void)?
+    var onReturnToNativePane: ((MainPaneMode) -> Void)?
 
     var activeWebView: SwipeBackWebView? {
         if activeSection == .explore {
@@ -58,6 +60,9 @@ final class WebViewManager: NSObject, ObservableObject {
     private var pendingOpenCloudCollectionsTab: Bool = false
     private var switchSequenceToken: Int = 0
     private var telemetryRuleList: WKContentRuleList?
+    /// Canonical key of the root note opened directly from History/Collections, so closing it
+    /// returns straight to History/Collections instead of letting Xiaohongshu's modal X dump onto /explore!
+    private var secondaryRootNoteKey: String?
 
     // Per-WebView cached state so switching tabs never loses state or triggers reloads
     private var exploreSnapshot = CurrentPageSnapshot(url: NavSection.explore.targetURL.absoluteString)
@@ -159,7 +164,9 @@ final class WebViewManager: NSObject, ObservableObject {
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
         let contentController = WKUserContentController()
-        let roleScript = isExplore ? "window.__rednoteRole = 'explore';" : "window.__rednoteRole = 'secondary';"
+        let roleScript = isExplore
+            ? "window.__rednoteRole = 'explore'; window.__rednoteIsAuthorPage = false;"
+            : "window.__rednoteRole = 'secondary'; window.__rednoteIsAuthorPage = \((activeSection == .authorProfile) ? "true" : "false");"
         contentController.addUserScript(WKUserScript(
             source: roleScript,
             injectionTime: .atDocumentStart,
@@ -393,6 +400,7 @@ final class WebViewManager: NSObject, ObservableObject {
     /// Switches to Discover WITHOUT refreshing when coming from any other section or pane.
     /// ONLY refreshes when the user is ALREADY viewing Discover and clicks Discover again.
     func switchToExplore(wasAlreadyShowingExplore: Bool) {
+        returnPaneOnExit = nil
         if isHibernated || exploreWebView == nil {
             setupExploreWebView(loading: lastExploreURL)
             activeSection = .explore
@@ -436,11 +444,15 @@ final class WebViewManager: NSObject, ObservableObject {
     /// Opens an author's profile (or standalone saved note) in a fresh secondary WebView so:
     /// 1. Discover feed and its exact scroll position stay 100% frozen and untouched;
     /// 2. Previous author's DOM & back-forward history are completely cleared (zero flash or detour through old author).
-    func openAuthorProfileInSecondary(url: URL) {
+    func openAuthorProfileInSecondary(url: URL, returnPane: MainPaneMode? = nil) {
         pauseMedia(in: exploreWebView)
         isHibernated = false
+        returnPaneOnExit = returnPane
+        secondaryRootNoteKey = (returnPane != nil && XHSURLClassifier.extractNoteId(from: url.absoluteString) != nil)
+            ? XHSURLClassifier.canonicalKey(for: url.absoluteString)
+            : nil
         activeSection = .authorProfile
-        secondarySnapshot = CurrentPageSnapshot(url: url.absoluteString, title: "博主主页")
+        secondarySnapshot = CurrentPageSnapshot(url: url.absoluteString, title: returnPane == nil ? "博主主页" : "笔记详情")
         secondaryIsInDetail = XHSURLClassifier.extractNoteId(from: url.absoluteString) != nil
         lastSecondaryURL = url
 
@@ -451,6 +463,7 @@ final class WebViewManager: NSObject, ObservableObject {
 
     /// Opens a non-Discover web section in the lazy secondary WebView so Discover stays untouched.
     func switchToSecondarySection(_ section: NavSection) {
+        returnPaneOnExit = nil
         guard section != .explore else {
             switchToExplore(wasAlreadyShowingExplore: false)
             return
@@ -543,6 +556,7 @@ final class WebViewManager: NSObject, ObservableObject {
     // MARK: - Top Channel Tag Switching (Explicit User Action -> Always Loads/Refreshes Target Tag)
 
     func selectChannel(_ channel: ExploreChannel) {
+        returnPaneOnExit = nil
         let wasSameChannel = (activeSection == .explore && activeChannel == channel && !exploreIsInDetail)
         pauseMedia(in: secondaryWebView)
         activeSection = .explore
@@ -640,6 +654,23 @@ final class WebViewManager: NSObject, ObservableObject {
         swipeBackProgress = 0
         guard let wv = activeWebView, !isHibernated else { return }
         let isExplore = (activeSection == .explore)
+        let currentURLStr = wv.url?.absoluteString ?? currentURL
+        let currentKey = XHSURLClassifier.canonicalKey(for: currentURLStr)
+        let backURL = wv.backForwardList.backItem?.url.absoluteString ?? ""
+        let backKey = XHSURLClassifier.canonicalKey(for: backURL)
+        let hasDistinctHistoryBack = wv.canGoBack && backURL.hasPrefix("http") && backKey != currentKey
+
+        // CRITICAL: When returning from the root note opened directly from History or Local Collections,
+        // do NOT click Xiaohongshu's modal close button (which navigates SSR /explore/<id> to /explore recommend feed!).
+        // Immediately tear down secondaryWebView and return straight to History / Local Collections!
+        if activeSection == .authorProfile,
+           returnPaneOnExit != nil,
+           let rootKey = secondaryRootNoteKey,
+           currentKey == rootKey,
+           !hasDistinctHistoryBack {
+            returnFromAuthorProfileToExplore(closeExploreModal: false)
+            return
+        }
 
         if isInNoteDetail {
             wv.evaluateJavaScript("window.__rednoteLite ? window.__rednoteLite.closeNoteDetail() : 'standalone'") { [weak self] result, _ in
@@ -649,10 +680,9 @@ final class WebViewManager: NSObject, ObservableObject {
                     if outcome == "modal_closed" || outcome == "modal_escape" {
                         if isExplore { self.exploreIsInDetail = false } else { self.secondaryIsInDetail = false }
                         self.isInNoteDetail = false
-                    } else if wv.canGoBack {
+                    } else if hasDistinctHistoryBack {
                         wv.goBack()
                     } else if self.activeSection == .authorProfile {
-                        // Standalone note opened in secondary -> return cleanly to Discover without reloading!
                         self.returnFromAuthorProfileToExplore(closeExploreModal: false)
                     } else {
                         if isExplore { self.exploreIsInDetail = false } else { self.secondaryIsInDetail = false }
@@ -661,21 +691,21 @@ final class WebViewManager: NSObject, ObservableObject {
                 }
             }
         } else if activeSection == .authorProfile {
-            // If user navigated to a 2nd author inside secondaryWebView, step back first;
-            // otherwise glide straight back to Discover at exact previous scroll position with ZERO reload!
-            if wv.canGoBack,
-               let backURL = wv.backForwardList.backItem?.url.absoluteString,
-               backURL.contains("/user/profile/") {
+            if hasDistinctHistoryBack {
                 wv.goBack()
             } else {
                 returnFromAuthorProfileToExplore(closeExploreModal: false)
             }
-        } else if wv.canGoBack {
+        } else if hasDistinctHistoryBack {
             wv.goBack()
         }
     }
 
     func returnFromAuthorProfileToExplore(closeExploreModal: Bool) {
+        let targetNativePane = returnPaneOnExit
+        returnPaneOnExit = nil
+        secondaryRootNoteKey = nil
+
         if secondaryLoadedSection == .authorProfile {
             teardownWebView(&secondaryWebView, observations: &secondaryObservations)
             secondaryLoadedSection = nil
@@ -685,6 +715,12 @@ final class WebViewManager: NSObject, ObservableObject {
         }
         activeSection = .explore
         syncPublishedStateFromActiveWebView()
+
+        if let targetNativePane, targetNativePane != .web {
+            onReturnToNativePane?(targetNativePane)
+            return
+        }
+
         if closeExploreModal && exploreIsInDetail {
             exploreWebView?.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.closeNoteDetail();", completionHandler: nil)
             exploreIsInDetail = false
@@ -703,10 +739,10 @@ final class WebViewManager: NSObject, ObservableObject {
         exploreWebView?.load(URLRequest(url: url, cachePolicy: policy))
     }
 
-    func openNoteFromLocal(urlString: String) {
+    func openNoteFromLocal(urlString: String, returnTo: MainPaneMode) {
         guard let url = URL(string: urlString) else { return }
-        // Open saved history/collection notes in secondaryWebView so Discover feed & scrollY stay intact!
-        openAuthorProfileInSecondary(url: url)
+        // Open saved history/collection notes in fresh secondaryWebView and remember where to return!
+        openAuthorProfileInSecondary(url: url, returnPane: returnTo)
     }
 
     func search(keyword: String) {
@@ -787,6 +823,7 @@ final class WebViewManager: NSObject, ObservableObject {
     /// Opens the user's official Xiaohongshu profile Cloud Collections tab in the secondary WebView
     /// (keeping Discover feed untouched).
     func openCloudCollections() {
+        returnPaneOnExit = nil
         pendingOpenCloudCollectionsTab = true
         pauseMedia(in: exploreWebView)
         isHibernated = false
@@ -819,6 +856,7 @@ final class WebViewManager: NSObject, ObservableObject {
                 let title = (item["title"] as? String) ?? ""
                 let author = (item["author"] as? String) ?? ""
                 let cover = (item["coverURL"] as? String) ?? ""
+                let isVideo = (item["isVideo"] as? Bool) ?? false
                 return CurrentPageSnapshot(
                     url: url,
                     noteId: noteId,
@@ -826,7 +864,8 @@ final class WebViewManager: NSObject, ObservableObject {
                     author: author,
                     coverURL: cover.isEmpty ? nil : cover,
                     excerpt: "",
-                    isNoteDetail: false
+                    isNoteDetail: false,
+                    isVideo: isVideo
                 )
             }
         } catch {
@@ -897,6 +936,7 @@ final class WebViewManager: NSObject, ObservableObject {
         let coverRaw = (dict["coverURL"] as? String) ?? ""
         let excerpt = (dict["excerpt"] as? String) ?? ""
         let isNoteDetail = (dict["isNoteDetail"] as? Bool) ?? (noteId != nil)
+        let isVideo = (dict["isVideo"] as? Bool) ?? false
 
         return CurrentPageSnapshot(
             url: url,
@@ -905,7 +945,8 @@ final class WebViewManager: NSObject, ObservableObject {
             author: author,
             coverURL: coverRaw.isEmpty ? nil : coverRaw,
             excerpt: excerpt,
-            isNoteDetail: isNoteDetail
+            isNoteDetail: isNoteDetail,
+            isVideo: isVideo
         )
     }
 }

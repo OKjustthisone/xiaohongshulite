@@ -367,6 +367,8 @@ enum WebScripts {
             return "";
         }
 
+        const clickedCardMeta = {};
+
         function firstImage(selectors) {
             for (const sel of selectors) {
                 const el = document.querySelector(sel);
@@ -375,6 +377,10 @@ enum WebScripts {
                 if (src && (src.startsWith("http://") || src.startsWith("https://"))) {
                     return src;
                 }
+                // Check CSS background-image (used by xgplayer video posters)
+                const bg = window.getComputedStyle(el).backgroundImage || "";
+                const m = bg.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/);
+                if (m && m[1]) return m[1];
             }
             return "";
         }
@@ -391,11 +397,13 @@ enum WebScripts {
             const noteId = extractNoteId(url);
             const modalVisible = isModalOpen();
             const hasDetail = modalVisible || !!noteId || !!document.querySelector("#noteContainer");
+            const cachedCard = noteId ? clickedCardMeta[noteId] : null;
 
             let title = "";
             let author = "";
             let excerpt = "";
             let coverURL = "";
+            let isVideo = !!(cachedCard && cachedCard.isVideo);
 
             if (hasDetail) {
                 title = firstText([
@@ -416,15 +424,25 @@ enum WebScripts {
                     "#detail-desc",
                     ".note-content .desc"
                 ]).slice(0, 180);
+
+                if (document.querySelector("#noteContainer video, .note-detail-mask video, .xgplayer, .player-container video")) {
+                    isVideo = true;
+                }
+
                 coverURL = firstImage([
                     ".note-slider-img",
                     ".swiper-slide-active img",
-                    "#noteContainer img",
+                    "#noteContainer .xgplayer-poster",
                     "#noteContainer video[poster]",
+                    "#noteContainer .media-container img",
+                    "#noteContainer img",
                     'meta[property="og:image"]'
                 ]);
             }
 
+            if (!coverURL && cachedCard && cachedCard.coverURL) {
+                coverURL = cachedCard.coverURL;
+            }
             if (!title) {
                 title = (document.title || "")
                     .replace(/\s*[-–—|]\s*小红书.*$/u, "")
@@ -448,7 +466,8 @@ enum WebScripts {
                 author: author,
                 coverURL: coverURL,
                 excerpt: excerpt,
-                isNoteDetail: hasDetail
+                isNoteDetail: hasDetail,
+                isVideo: isVideo
             };
         }
 
@@ -456,7 +475,7 @@ enum WebScripts {
             if (reportTimer) clearTimeout(reportTimer);
             reportTimer = setTimeout(() => {
                 const snap = collectSnapshot();
-                const key = `${snap.url}|${snap.title}|${snap.author}|${snap.isNoteDetail}`;
+                const key = `${snap.url}|${snap.title}|${snap.author}|${snap.isNoteDetail}|${snap.isVideo}|${snap.coverURL}`;
                 if (force || key !== lastSentKey) {
                     lastSentKey = key;
                     post(snap);
@@ -649,8 +668,19 @@ enum WebScripts {
             return false;
         }
 
+        function getSearchStore() {
+            try {
+                const appEl = document.querySelector("#app");
+                const pinia = appEl && appEl.__vue_app__ && appEl.__vue_app__.config && appEl.__vue_app__.config.globalProperties && appEl.__vue_app__.config.globalProperties.$pinia;
+                return pinia && pinia._s ? pinia._s.get("search") : null;
+            } catch (_) {
+                return null;
+            }
+        }
+
         /// Direct Vue 3 Router SPA switch for topic tags (上海/科技/数码/AI/财经/育儿) and search.
-        /// Measured ~150-250ms (15x faster than 3.5s full-page reload!).
+        /// Mirrors Xiaohongshu's exact search submission (Pinia searchStore + encodeURIComponent keyword)
+        /// and avoids the first-entry empty-state bug when entering /search_result from /explore!
         function searchInSPA(keyword) {
             const kw = (keyword || "").trim();
             if (!kw) return "invalid";
@@ -659,17 +689,49 @@ enum WebScripts {
             const router = getVueRouter();
             if (router) {
                 try {
-                    const source = window.location.pathname.includes("/search_result")
-                        ? "web_search_result_notes"
-                        : "web_explore_feed";
-                    router.push({
-                        path: "/search_result",
-                        query: { keyword: kw, source: source, type: "51" }
-                    });
+                    const ss = getSearchStore();
+                    const wasOnSearch = window.location.pathname.includes("/search_result");
+                    const source = wasOnSearch ? "web_search_result_notes" : "web_explore_feed";
+                    const encodedKw = encodeURIComponent(kw);
+
+                    if (ss) {
+                        ss.isSearchFromAiInput = false;
+                        if (typeof ss.mutateSearchValue === "function") ss.mutateSearchValue(kw);
+                    }
+
+                    if (wasOnSearch) {
+                        if (ss && ss.searchContext) {
+                            ss.searchContext.keyword = kw;
+                            ss.searchContext.page = 1;
+                        }
+                        router.push({
+                            name: "search",
+                            query: { keyword: encodedKw, source: source }
+                        });
+                    } else {
+                        // First entry from /explore: mount SearchResult first, then replace keyword "" -> encodedKw
+                        // so SearchResult's mounted route.query.keyword watcher triggers search/filter + onebox + notes!
+                        router.push({
+                            name: "search",
+                            query: { keyword: "", source: source }
+                        }).then(() => {
+                            setTimeout(() => {
+                                if (ss && ss.searchContext) {
+                                    ss.searchContext.keyword = kw;
+                                    ss.searchContext.page = 1;
+                                }
+                                router.replace({
+                                    name: "search",
+                                    query: { keyword: encodedKw, source: source }
+                                });
+                            }, 60);
+                        });
+                    }
+
                     setTimeout(() => {
                         unstickSearchBars();
                         scheduleReport(true, 80);
-                    }, 180);
+                    }, 260);
                     return "router_pushed";
                 } catch (_) {}
             }
@@ -818,6 +880,7 @@ enum WebScripts {
                 const titleEl = card.querySelector(".title span, .title, .footer .title");
                 const authorEl = card.querySelector(".author .name, .author-wrapper .name, .name");
                 const imgEl = card.querySelector("img");
+                const isVideo = !!card.querySelector(".play-icon, [class*='play-icon'], [class*='video-icon'], svg use[href*='play'], svg use[xlink\\:href*='play']");
                 const title = (titleEl ? titleEl.textContent : "").trim();
                 const author = (authorEl ? authorEl.textContent : "").trim();
                 const coverURL = imgEl ? (imgEl.currentSrc || imgEl.getAttribute("src") || "") : "";
@@ -827,22 +890,30 @@ enum WebScripts {
                     noteId,
                     title: title || ("笔记 " + noteId.slice(0, 8)),
                     author,
-                    coverURL
+                    coverURL,
+                    isVideo
                 });
             });
             return items;
         }
 
-        // Right-click outside media/input/selection inside a note detail immediately goes back
+        // Right-click outside media/input/selection goes back (matching top-left Back button behavior):
+        // - Inside any note detail page (Discover, Search, History, Collections, Author Profile, Cloud Collections)
+        // - On an Author Profile page opened from a post (outside cards/links/images/inputs/selection)
         document.addEventListener("contextmenu", (e) => {
             const inNoteDetail = isModalOpen() || !!extractNoteId(window.location.href) || !!document.querySelector("#noteContainer");
-            if (!inNoteDetail) return;
+            const onAuthorPage = !!window.__rednoteIsAuthorPage && window.location.pathname.includes("/user/profile/");
+            if (!inNoteDetail && !onAuthorPage) return;
 
             const target = e.target;
             if (!(target instanceof Element)) return;
 
             // Keep native right-click menu on images/videos/media gallery
             if (target.closest(".media-container, .slider-container, .swiper, img, video, canvas, picture")) {
+                return;
+            }
+            // On Author Profile grid (outside note detail), keep normal menu on cards/links/buttons
+            if (!inNoteDetail && target.closest("section.note-item, a[href], button")) {
                 return;
             }
             // Keep native right-click menu in editable inputs (paste, etc.)
@@ -860,10 +931,23 @@ enum WebScripts {
             post({ type: "rightClickBack" });
         }, true);
 
-        // Passive listener: clicking Xiaohongshu's in-page star icon also syncs to local collections
+        // Passive listener: cache clicked feed card cover/video info + intercept author profiles + sync cloud collect
         document.addEventListener("click", (e) => {
             const target = e.target;
             if (!(target instanceof Element)) return;
+
+            // Record feed card cover & video badge before opening note detail (ensures video notes always get crisp covers!)
+            const feedCard = target.closest("section.note-item");
+            if (feedCard) {
+                const link = feedCard.querySelector('a[href*="/explore/"], a[href*="/discovery/item/"], a.cover');
+                const cid = link && link.href ? extractNoteId(link.href) : null;
+                if (cid) {
+                    const img = feedCard.querySelector("img");
+                    const cover = img ? (img.currentSrc || img.getAttribute("src") || "") : "";
+                    const isVid = !!feedCard.querySelector(".play-icon, [class*='play-icon'], [class*='video-icon'], svg use[href*='play'], svg use[xlink\\:href*='play']");
+                    clickedCardMeta[cid] = { coverURL: cover, isVideo: isVid };
+                }
+            }
 
             // In Discover WebView, intercept clicks on any author/commenter profile link so it opens
             // in the secondary WebView without ever disturbing or scrolling the Discover feed!
@@ -1004,6 +1088,18 @@ enum WebScripts {
         // Apply CSS immediately; defer video IntersectionObserver slightly so Vue hydration gets 100% CPU first
         applyCleanMode(cleanEnabled);
         setTimeout(() => applyEcoMode(ecoEnabled, blockAutoplay), 600);
+        // Quietly preload SearchResult's lazy JS chunks during idle so first topic tag click is instant
+        if (window.__rednoteRole === "explore") {
+            setTimeout(() => {
+                try {
+                    const router = getVueRouter();
+                    const rt = router && router.getRoutes && router.getRoutes().find((r) => r.name === "search");
+                    if (rt && rt.components && typeof rt.components.default === "function") {
+                        rt.components.default().catch(() => {});
+                    }
+                } catch (_) {}
+            }, 1200);
+        }
         scheduleReport(true, 150);
     })();
     """#

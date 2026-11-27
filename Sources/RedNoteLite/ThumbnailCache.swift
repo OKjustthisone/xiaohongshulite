@@ -9,8 +9,8 @@ final class ThumbnailCache: @unchecked Sendable {
 
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
-        c.countLimit = 48
-        c.totalCostLimit = 8 * 1024 * 1024
+        c.countLimit = 80
+        c.totalCostLimit = 24 * 1024 * 1024
         return c
     }()
 

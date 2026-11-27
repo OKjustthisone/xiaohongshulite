@@ -423,7 +423,7 @@ struct ContentView: View {
             HStack(spacing: 4) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 12, weight: .bold))
-                Text("返回")
+                Text(noteBackLabel)
                     .font(.system(size: 12.5, weight: .semibold))
             }
             .padding(.horizontal, 10)
@@ -431,7 +431,7 @@ struct ContentView: View {
             .background(Color.primary.opacity(0.08), in: Capsule())
         }
         .buttonStyle(.plain)
-        .help("返回列表（支持双指右拉、右侧空白处右键或按 ESC）")
+        .help("返回上一页（支持双指右拉、右侧空白处右键或按 ESC）")
 
         VStack(alignment: .leading, spacing: 1) {
             Text(webManager.currentSnapshot.title.isEmpty ? webManager.pageTitle : webManager.currentSnapshot.title)
@@ -487,6 +487,14 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .help("复制帖子链接")
+        }
+    }
+
+    private var noteBackLabel: String {
+        switch webManager.returnPaneOnExit {
+        case .history: return "返回浏览历史"
+        case .collections: return "返回本地收藏"
+        default: return "返回"
         }
     }
 

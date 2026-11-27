@@ -153,6 +153,7 @@ public struct HistoryEntry: Identifiable, Hashable, Codable, Sendable {
     public let excerpt: String
     public let visitedAt: Date
     public let visitCount: Int
+    public let isVideo: Bool
 
     public init(
         id: String,
@@ -163,7 +164,8 @@ public struct HistoryEntry: Identifiable, Hashable, Codable, Sendable {
         coverURL: String? = nil,
         excerpt: String = "",
         visitedAt: Date = Date(),
-        visitCount: Int = 1
+        visitCount: Int = 1,
+        isVideo: Bool = false
     ) {
         self.id = id
         self.noteId = noteId
@@ -174,6 +176,7 @@ public struct HistoryEntry: Identifiable, Hashable, Codable, Sendable {
         self.excerpt = excerpt
         self.visitedAt = visitedAt
         self.visitCount = visitCount
+        self.isVideo = isVideo
     }
 }
 
@@ -189,6 +192,7 @@ public struct CollectionEntry: Identifiable, Hashable, Codable, Sendable {
     public var memo: String
     public let createdAt: Date
     public var updatedAt: Date
+    public let isVideo: Bool
 
     public init(
         id: String,
@@ -201,7 +205,8 @@ public struct CollectionEntry: Identifiable, Hashable, Codable, Sendable {
         folder: String = "默认收藏",
         memo: String = "",
         createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        isVideo: Bool = false
     ) {
         self.id = id
         self.noteId = noteId
@@ -214,6 +219,7 @@ public struct CollectionEntry: Identifiable, Hashable, Codable, Sendable {
         self.memo = memo
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.isVideo = isVideo
     }
 }
 
@@ -225,6 +231,7 @@ public struct CurrentPageSnapshot: Equatable, Sendable {
     public let coverURL: String?
     public let excerpt: String
     public let isNoteDetail: Bool
+    public let isVideo: Bool
 
     public init(
         url: String,
@@ -233,7 +240,8 @@ public struct CurrentPageSnapshot: Equatable, Sendable {
         author: String = "",
         coverURL: String? = nil,
         excerpt: String = "",
-        isNoteDetail: Bool = false
+        isNoteDetail: Bool = false,
+        isVideo: Bool = false
     ) {
         self.url = url
         self.noteId = noteId
@@ -242,6 +250,7 @@ public struct CurrentPageSnapshot: Equatable, Sendable {
         self.coverURL = coverURL
         self.excerpt = excerpt
         self.isNoteDetail = isNoteDetail
+        self.isVideo = isVideo
     }
 }
 

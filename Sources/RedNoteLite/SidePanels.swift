@@ -207,11 +207,27 @@ private struct CollectionCard: View {
     }
 }
 
-// MARK: - Full-Pane Native History View
+// MARK: - Full-Pane Native History View (Xiaohongshu-Style Masonry Waterfall)
+
+private enum HistoryMediaFilter: String, CaseIterable, Identifiable {
+    case all = "全部"
+    case photo = "图文"
+    case video = "视频"
+    var id: String { rawValue }
+}
 
 struct HistoryPaneView: View {
     @ObservedObject var state: AppState
     @State private var confirmClear = false
+    @State private var mediaFilter: HistoryMediaFilter = .all
+
+    private var filteredItems: [HistoryEntry] {
+        switch mediaFilter {
+        case .all: return state.historyItems
+        case .photo: return state.historyItems.filter { !$0.isVideo }
+        case .video: return state.historyItems.filter { $0.isVideo }
+        }
+    }
 
     private var groupedHistory: [(String, [HistoryEntry])] {
         let cal = Calendar.current
@@ -222,7 +238,7 @@ struct HistoryPaneView: View {
             ("本周", []),
             ("更早", [])
         ]
-        for item in state.historyItems {
+        for item in filteredItems {
             if cal.isDateInToday(item.visitedAt) {
                 buckets[0].1.append(item)
             } else if cal.isDateInYesterday(item.visitedAt) {
@@ -238,7 +254,26 @@ struct HistoryPaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                // Media Type Filter Chips (全部 / 图文 / 视频)
+                HStack(spacing: 4) {
+                    ForEach(HistoryMediaFilter.allCases) { filter in
+                        let selected = mediaFilter == filter
+                        Button {
+                            mediaFilter = filter
+                        } label: {
+                            Text(filter.rawValue)
+                                .font(.caption.weight(selected ? .semibold : .regular))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(selected ? xhsRed : Color.secondary.opacity(0.1), in: Capsule())
+                                .foregroundStyle(selected ? .white : .primary)
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.caption)
@@ -257,12 +292,12 @@ struct HistoryPaneView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .frame(maxWidth: 320)
+                .frame(maxWidth: 280)
                 .background(Color.secondary.opacity(0.1), in: Capsule())
 
                 Spacer()
 
-                Text("共 \(state.historyItems.count) 条记录")
+                Text("共 \(filteredItems.count) 条")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -278,25 +313,35 @@ struct HistoryPaneView: View {
 
             Divider()
 
-            if state.historyItems.isEmpty {
+            if filteredItems.isEmpty {
                 emptyPaneState(
-                    icon: "clock",
-                    title: "暂无浏览历史",
-                    subtitle: "打开任意小红书帖子、博主主页或搜索结果后，会自动静默记录到这里。"
+                    icon: mediaFilter == .video ? "video.slash" : "clock",
+                    title: state.historyItems.isEmpty ? "暂无浏览历史" : "当前筛选下暂无记录",
+                    subtitle: state.historyItems.isEmpty
+                        ? "打开任意小红书帖子后，会自动以瀑布流卡片记录到这里。"
+                        : "切换「全部」或清空搜索词即可查看其他浏览历史。"
                 )
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        ForEach(groupedHistory, id: \.0) { sectionTitle, items in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(sectionTitle)
-                                    .font(.headline)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 4)
+                GeometryReader { geo in
+                    let colCount = max(2, min(5, Int((geo.size.width - 36) / 215)))
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 24) {
+                            ForEach(groupedHistory, id: \.0) { sectionTitle, items in
+                                VStack(alignment: .leading, spacing: 12) {
+                                    HStack(spacing: 6) {
+                                        Text(sectionTitle)
+                                            .font(.system(size: 14, weight: .semibold))
+                                        Text("\(items.count)")
+                                            .font(.caption2.monospacedDigit())
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1)
+                                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 2)
 
-                                VStack(spacing: 1) {
-                                    ForEach(items) { entry in
-                                        HistoryRow(
+                                    WaterfallMasonryGrid(items: items, columnCount: colCount, spacing: 16) { entry in
+                                        HistoryWaterfallCard(
                                             entry: entry,
                                             onOpen: { state.openNoteURL(entry.url) },
                                             onCollect: { state.collectHistoryEntry(entry) },
@@ -304,20 +349,10 @@ struct HistoryPaneView: View {
                                         )
                                     }
                                 }
-                                .background(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(Color(nsColor: .controlBackgroundColor))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-                                )
                             }
                         }
+                        .padding(18)
                     }
-                    .padding(20)
-                    .frame(maxWidth: 820)
-                    .frame(maxWidth: .infinity)
                 }
             }
         }
@@ -331,7 +366,37 @@ struct HistoryPaneView: View {
     }
 }
 
-private struct HistoryRow: View {
+/// Multi-column balanced masonry waterfall grid matching Xiaohongshu's home Discover layout.
+private struct WaterfallMasonryGrid<Item: Identifiable, Content: View>: View {
+    let items: [Item]
+    let columnCount: Int
+    let spacing: CGFloat
+    @ViewBuilder let content: (Item) -> Content
+
+    private var columnsData: [[Item]] {
+        let count = max(1, columnCount)
+        var cols = Array(repeating: [Item](), count: count)
+        for (idx, item) in items.enumerated() {
+            cols[idx % count].append(item)
+        }
+        return cols
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: spacing) {
+            ForEach(0..<columnsData.count, id: \.self) { colIdx in
+                LazyVStack(spacing: spacing) {
+                    ForEach(columnsData[colIdx]) { item in
+                        content(item)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+}
+
+private struct HistoryWaterfallCard: View {
     let entry: HistoryEntry
     let onOpen: () -> Void
     let onCollect: () -> Void
@@ -345,60 +410,105 @@ private struct HistoryRow: View {
     }()
 
     var body: some View {
-        HStack(spacing: 12) {
-            AsyncThumbnailView(urlString: entry.coverURL, width: 48, height: 48, cornerRadius: 8)
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                AsyncCoverImageView(urlString: entry.coverURL, cornerRadius: 12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(isHovered ? xhsRed.opacity(0.55) : Color.primary.opacity(0.06), lineWidth: 1)
+                    )
 
-            VStack(alignment: .leading, spacing: 3) {
+                // Top-Right Media Type Badge (视频 vs 图文)
+                VStack {
+                    HStack {
+                        // Top-Left Hover Quick Actions
+                        if isHovered {
+                            HStack(spacing: 5) {
+                                Button(action: onCollect) {
+                                    Image(systemName: "star.fill")
+                                        .font(.system(size: 10.5))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 24, height: 24)
+                                        .background(Color.black.opacity(0.55), in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("加入本地收藏夹")
+
+                                Button(action: onDelete) {
+                                    Image(systemName: "trash.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 24, height: 24)
+                                        .background(Color.black.opacity(0.55), in: Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("删除此条记录")
+                            }
+                            .transition(.opacity)
+                        }
+
+                        Spacer()
+
+                        // Video vs Photo Pill Badge
+                        HStack(spacing: 3) {
+                            Image(systemName: entry.isVideo ? "play.fill" : "photo")
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text(entry.isVideo ? "视频" : "图文")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(
+                            entry.isVideo ? Color.black.opacity(0.68) : Color.black.opacity(0.45),
+                            in: Capsule()
+                        )
+                    }
+                    Spacer()
+
+                    if entry.visitCount > 1 {
+                        HStack {
+                            Spacer()
+                            Text("看过 \(entry.visitCount) 次")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(Color.black.opacity(0.52), in: Capsule())
+                        }
+                    }
+                }
+                .padding(8)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
                 Text(entry.title)
-                    .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .lineLimit(2)
+                    .foregroundStyle(.primary)
 
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     if !entry.author.isEmpty {
-                        Text("@\(entry.author)")
+                        Text(entry.author)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
+                    Spacer(minLength: 4)
                     Text(Self.timeFormatter.string(from: entry.visitedAt))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                    if entry.visitCount > 1 {
-                        Text("浏览 \(entry.visitCount) 次")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.1), in: Capsule())
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
-
-            Spacer()
-
-            HStack(spacing: 8) {
-                Button(action: onCollect) {
-                    Image(systemName: "star")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("加入本地收藏夹")
-
-                Button(action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.caption)
-                        .foregroundStyle(.secondary.opacity(0.75))
-                }
-                .buttonStyle(.plain)
-                .help("删除此条历史")
-            }
-            .opacity(isHovered ? 1 : 0.4)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 4)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(isHovered ? Color.primary.opacity(0.04) : Color.clear)
         .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.14)) {
+                isHovered = hovering
+            }
+        }
         .onTapGesture { onOpen() }
         .contextMenu {
             Button("全屏打开笔记", action: onOpen)

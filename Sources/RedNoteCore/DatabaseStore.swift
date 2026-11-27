@@ -67,7 +67,8 @@ public final class DatabaseStore: @unchecked Sendable {
                 cover_url TEXT,
                 excerpt TEXT NOT NULL,
                 visited_at REAL NOT NULL,
-                visit_count INTEGER NOT NULL DEFAULT 1
+                visit_count INTEGER NOT NULL DEFAULT 1,
+                is_video INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_history_visited_at ON history(visited_at DESC);
             """)
@@ -84,11 +85,16 @@ public final class DatabaseStore: @unchecked Sendable {
                 folder TEXT NOT NULL DEFAULT '默认收藏',
                 memo TEXT NOT NULL DEFAULT '',
                 created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                is_video INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_collections_updated_at ON collections(updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_collections_folder ON collections(folder);
             """)
+
+            // Safe non-destructive migration for existing databases created prior to is_video column
+            _ = try? executeRaw("ALTER TABLE history ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0;")
+            _ = try? executeRaw("ALTER TABLE collections ADD COLUMN is_video INTEGER NOT NULL DEFAULT 0;")
         }
     }
 
@@ -111,6 +117,7 @@ public final class DatabaseStore: @unchecked Sendable {
         author: String = "",
         coverURL: String? = nil,
         excerpt: String = "",
+        isVideo: Bool = false,
         visitedAt: Date = Date(),
         maxItems: Int = 500
     ) throws {
@@ -123,8 +130,8 @@ public final class DatabaseStore: @unchecked Sendable {
         try queue.sync {
             guard let db else { return }
             let sql = """
-            INSERT INTO history (id, note_id, url, title, author, cover_url, excerpt, visited_at, visit_count)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+            INSERT INTO history (id, note_id, url, title, author, cover_url, excerpt, visited_at, visit_count, is_video)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 title = CASE WHEN length(excluded.title) > 0 THEN excluded.title ELSE history.title END,
@@ -132,7 +139,8 @@ public final class DatabaseStore: @unchecked Sendable {
                 cover_url = COALESCE(NULLIF(excluded.cover_url, ''), history.cover_url),
                 excerpt = CASE WHEN length(excluded.excerpt) > 0 THEN excluded.excerpt ELSE history.excerpt END,
                 visited_at = excluded.visited_at,
-                visit_count = history.visit_count + 1;
+                visit_count = history.visit_count + 1,
+                is_video = CASE WHEN excluded.is_video = 1 THEN 1 ELSE history.is_video END;
             """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -148,6 +156,7 @@ public final class DatabaseStore: @unchecked Sendable {
             bindOptionalText(stmt, 6, coverURL)
             bindText(stmt, 7, excerpt)
             sqlite3_bind_double(stmt, 8, visitedAt.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 9, isVideo ? 1 : 0)
 
             guard sqlite3_step(stmt) == SQLITE_DONE else {
                 throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
@@ -176,14 +185,14 @@ public final class DatabaseStore: @unchecked Sendable {
             let sql: String
             if trimmed.isEmpty {
                 sql = """
-                SELECT id, note_id, url, title, author, cover_url, excerpt, visited_at, visit_count
+                SELECT id, note_id, url, title, author, cover_url, excerpt, visited_at, visit_count, is_video
                 FROM history
                 ORDER BY visited_at DESC
                 LIMIT ?1;
                 """
             } else {
                 sql = """
-                SELECT id, note_id, url, title, author, cover_url, excerpt, visited_at, visit_count
+                SELECT id, note_id, url, title, author, cover_url, excerpt, visited_at, visit_count, is_video
                 FROM history
                 WHERE title LIKE ?1 OR author LIKE ?1 OR excerpt LIKE ?1
                 ORDER BY visited_at DESC
@@ -216,7 +225,8 @@ public final class DatabaseStore: @unchecked Sendable {
                     coverURL: readOptionalText(stmt, 5),
                     excerpt: readText(stmt, 6),
                     visitedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)),
-                    visitCount: Int(sqlite3_column_int(stmt, 8))
+                    visitCount: Int(sqlite3_column_int(stmt, 8)),
+                    isVideo: sqlite3_column_int(stmt, 9) != 0
                 ))
             }
             return results
@@ -255,6 +265,7 @@ public final class DatabaseStore: @unchecked Sendable {
         excerpt: String = "",
         folder: String = "默认收藏",
         memo: String = "",
+        isVideo: Bool = false,
         now: Date = Date()
     ) throws -> CollectionEntry {
         let resolvedNoteId = noteId ?? XHSURLClassifier.extractNoteId(from: url)
@@ -267,8 +278,8 @@ public final class DatabaseStore: @unchecked Sendable {
         try queue.sync {
             guard let db else { return }
             let sql = """
-            INSERT INTO collections (id, note_id, url, title, author, cover_url, excerpt, folder, memo, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            INSERT INTO collections (id, note_id, url, title, author, cover_url, excerpt, folder, memo, created_at, updated_at, is_video)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 title = CASE WHEN length(excluded.title) > 0 THEN excluded.title ELSE collections.title END,
@@ -277,7 +288,8 @@ public final class DatabaseStore: @unchecked Sendable {
                 excerpt = CASE WHEN length(excluded.excerpt) > 0 THEN excluded.excerpt ELSE collections.excerpt END,
                 folder = excluded.folder,
                 memo = CASE WHEN length(excluded.memo) > 0 THEN excluded.memo ELSE collections.memo END,
-                updated_at = excluded.updated_at;
+                updated_at = excluded.updated_at,
+                is_video = CASE WHEN excluded.is_video = 1 THEN 1 ELSE collections.is_video END;
             """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -295,6 +307,7 @@ public final class DatabaseStore: @unchecked Sendable {
             bindText(stmt, 8, cleanFolder)
             bindText(stmt, 9, memo)
             sqlite3_bind_double(stmt, 10, now.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 11, isVideo ? 1 : 0)
 
             guard sqlite3_step(stmt) == SQLITE_DONE else {
                 throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
@@ -312,7 +325,8 @@ public final class DatabaseStore: @unchecked Sendable {
             folder: cleanFolder,
             memo: memo,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            isVideo: isVideo
         )
     }
 
@@ -343,7 +357,7 @@ public final class DatabaseStore: @unchecked Sendable {
 
             let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
             let sql = """
-            SELECT id, note_id, url, title, author, cover_url, excerpt, folder, memo, created_at, updated_at
+            SELECT id, note_id, url, title, author, cover_url, excerpt, folder, memo, created_at, updated_at, is_video
             FROM collections
             \(whereClause)
             ORDER BY updated_at DESC;
@@ -381,7 +395,8 @@ public final class DatabaseStore: @unchecked Sendable {
                     folder: readText(stmt, 7),
                     memo: readText(stmt, 8),
                     createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9)),
-                    updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 10))
+                    updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 10)),
+                    isVideo: sqlite3_column_int(stmt, 11) != 0
                 ))
             }
             return results
