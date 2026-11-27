@@ -862,9 +862,22 @@ enum WebScripts {
 
         // Passive listener: clicking Xiaohongshu's in-page star icon also syncs to local collections
         document.addEventListener("click", (e) => {
-            if (Date.now() < suppressPassiveCollectUntil) return;
             const target = e.target;
             if (!(target instanceof Element)) return;
+
+            // In Discover WebView, intercept clicks on any author/commenter profile link so it opens
+            // in the secondary WebView without ever disturbing or scrolling the Discover feed!
+            if (window.__rednoteRole === "explore") {
+                const profileLink = target.closest('a[href*="/user/profile/"]');
+                if (profileLink && profileLink.href && !profileLink.closest(".side-bar")) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    post({ type: "openAuthorProfile", url: profileLink.href });
+                    return;
+                }
+            }
+
+            if (Date.now() < suppressPassiveCollectUntil) return;
             const wrapper = target.closest('.collect-wrapper, #note-page-collect-board-guide, [class*="collect-wrapper"]');
             if (!wrapper) return;
 
@@ -878,6 +891,31 @@ enum WebScripts {
                 });
             }, 450);
         }, true);
+
+        // Guard Vue Router inside Discover WebView so programmatic pushes to /user/profile/
+        // also route to secondary WebView, keeping Discover feed & exact scrollY frozen!
+        (function installExploreProfileRouterGuard() {
+            if (window.__rednoteRole !== "explore") return;
+            let installed = false;
+            let tries = 0;
+            const timer = setInterval(() => {
+                tries++;
+                const router = getVueRouter();
+                if (router && typeof router.beforeEach === "function" && !installed) {
+                    installed = true;
+                    clearInterval(timer);
+                    router.beforeEach((to, from) => {
+                        if (to && to.path && to.path.startsWith("/user/profile/") && (!from || !from.path || !from.path.startsWith("/user/profile/"))) {
+                            const fullURL = new URL(to.fullPath, window.location.origin).href;
+                            post({ type: "openAuthorProfile", url: fullURL });
+                            return false;
+                        }
+                    });
+                } else if (tries >= 30) {
+                    clearInterval(timer);
+                }
+            }, 150);
+        })();
 
         // Hook SPA history transitions
         const origPushState = history.pushState;

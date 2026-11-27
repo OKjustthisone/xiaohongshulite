@@ -151,7 +151,7 @@ final class WebViewManager: NSObject, ObservableObject {
 
     // MARK: - WebView Factory & Lifecycle
 
-    private func makeConfiguredWebView() -> SwipeBackWebView {
+    private func makeConfiguredWebView(isExplore: Bool) -> SwipeBackWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.mediaTypesRequiringUserActionForPlayback = preferences.blockAutoplayVideo ? .all : []
@@ -159,6 +159,12 @@ final class WebViewManager: NSObject, ObservableObject {
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
         let contentController = WKUserContentController()
+        let roleScript = isExplore ? "window.__rednoteRole = 'explore';" : "window.__rednoteRole = 'secondary';"
+        contentController.addUserScript(WKUserScript(
+            source: roleScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         contentController.addUserScript(WKUserScript(
             source: WebScripts.earlyStyleScript,
             injectionTime: .atDocumentStart,
@@ -185,7 +191,7 @@ final class WebViewManager: NSObject, ObservableObject {
 
         wv.shouldHandleSwipeBack = { [weak self] in
             guard let self else { return false }
-            return self.isInNoteDetail || self.canGoBack
+            return self.isInNoteDetail || self.canGoBack || self.activeSection == .authorProfile
         }
         wv.onSwipeBackProgress = { [weak self] progress in
             self?.swipeBackProgress = progress
@@ -198,7 +204,7 @@ final class WebViewManager: NSObject, ObservableObject {
 
     private func setupExploreWebView(loading url: URL) {
         teardownWebView(&exploreWebView, observations: &exploreObservations)
-        let wv = makeConfiguredWebView()
+        let wv = makeConfiguredWebView(isExplore: true)
         exploreWebView = wv
         isHibernated = false
         exploreObservations = bindObservations(for: wv, isExplore: true)
@@ -208,7 +214,7 @@ final class WebViewManager: NSObject, ObservableObject {
 
     private func setupSecondaryWebView(loading url: URL, for section: NavSection) {
         teardownWebView(&secondaryWebView, observations: &secondaryObservations)
-        let wv = makeConfiguredWebView()
+        let wv = makeConfiguredWebView(isExplore: false)
         secondaryWebView = wv
         secondaryLoadedSection = section
         lastSecondaryURL = url
@@ -405,10 +411,41 @@ final class WebViewManager: NSObject, ObservableObject {
             return
         }
 
-        // Switching BACK to Discover from Notifications / DM / Profile / Collections / History / Settings:
+        // Switching BACK to Discover from Notifications / DM / Profile / Author Profile / Collections / History / Settings:
         // NEVER reload! Keep exact page, channel, and scroll position intact.
-        pauseMedia(in: secondaryWebView)
+        let comingFromAuthorProfile = (activeSection == .authorProfile)
+        if comingFromAuthorProfile || secondaryLoadedSection == .authorProfile {
+            teardownWebView(&secondaryWebView, observations: &secondaryObservations)
+            secondaryLoadedSection = nil
+            secondaryIsInDetail = false
+        } else {
+            pauseMedia(in: secondaryWebView)
+        }
         activeSection = .explore
+        syncPublishedStateFromActiveWebView()
+
+        // If user clicked sidebar "发现" while browsing an author's profile opened from a post,
+        // close the lingering post modal cleanly (ZERO reload) so they land directly at their previous feed scroll position!
+        if comingFromAuthorProfile && exploreIsInDetail {
+            exploreWebView?.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.closeNoteDetail();", completionHandler: nil)
+            exploreIsInDetail = false
+            isInNoteDetail = false
+        }
+    }
+
+    /// Opens an author's profile (or standalone saved note) in a fresh secondary WebView so:
+    /// 1. Discover feed and its exact scroll position stay 100% frozen and untouched;
+    /// 2. Previous author's DOM & back-forward history are completely cleared (zero flash or detour through old author).
+    func openAuthorProfileInSecondary(url: URL) {
+        pauseMedia(in: exploreWebView)
+        isHibernated = false
+        activeSection = .authorProfile
+        secondarySnapshot = CurrentPageSnapshot(url: url.absoluteString, title: "博主主页")
+        secondaryIsInDetail = XHSURLClassifier.extractNoteId(from: url.absoluteString) != nil
+        lastSecondaryURL = url
+
+        // Always start a fresh secondary WebView instance to guarantee clean history and zero flash of prior author
+        setupSecondaryWebView(loading: url, for: .authorProfile)
         syncPublishedStateFromActiveWebView()
     }
 
@@ -614,14 +651,44 @@ final class WebViewManager: NSObject, ObservableObject {
                         self.isInNoteDetail = false
                     } else if wv.canGoBack {
                         wv.goBack()
+                    } else if self.activeSection == .authorProfile {
+                        // Standalone note opened in secondary -> return cleanly to Discover without reloading!
+                        self.returnFromAuthorProfileToExplore(closeExploreModal: false)
                     } else {
                         if isExplore { self.exploreIsInDetail = false } else { self.secondaryIsInDetail = false }
                         self.isInNoteDetail = false
                     }
                 }
             }
+        } else if activeSection == .authorProfile {
+            // If user navigated to a 2nd author inside secondaryWebView, step back first;
+            // otherwise glide straight back to Discover at exact previous scroll position with ZERO reload!
+            if wv.canGoBack,
+               let backURL = wv.backForwardList.backItem?.url.absoluteString,
+               backURL.contains("/user/profile/") {
+                wv.goBack()
+            } else {
+                returnFromAuthorProfileToExplore(closeExploreModal: false)
+            }
         } else if wv.canGoBack {
             wv.goBack()
+        }
+    }
+
+    func returnFromAuthorProfileToExplore(closeExploreModal: Bool) {
+        if secondaryLoadedSection == .authorProfile {
+            teardownWebView(&secondaryWebView, observations: &secondaryObservations)
+            secondaryLoadedSection = nil
+            secondaryIsInDetail = false
+        } else {
+            pauseMedia(in: secondaryWebView)
+        }
+        activeSection = .explore
+        syncPublishedStateFromActiveWebView()
+        if closeExploreModal && exploreIsInDetail {
+            exploreWebView?.evaluateJavaScript("window.__rednoteLite && window.__rednoteLite.closeNoteDetail();", completionHandler: nil)
+            exploreIsInDetail = false
+            isInNoteDetail = false
         }
     }
 
@@ -638,10 +705,8 @@ final class WebViewManager: NSObject, ObservableObject {
 
     func openNoteFromLocal(urlString: String) {
         guard let url = URL(string: urlString) else { return }
-        pauseMedia(in: secondaryWebView)
-        activeSection = .explore
-        loadInExplore(url: url, ignoreCache: false)
-        syncPublishedStateFromActiveWebView()
+        // Open saved history/collection notes in secondaryWebView so Discover feed & scrollY stay intact!
+        openAuthorProfileInSecondary(url: url)
     }
 
     func search(keyword: String) {
@@ -864,6 +929,11 @@ extension WebViewManager: WKScriptMessageHandler {
                 goBackFromNote()
             }
 
+        case "openAuthorProfile":
+            if let urlStr = body["url"] as? String, let url = URL(string: urlStr) {
+                openAuthorProfileInSecondary(url: url)
+            }
+
         case "cloudCollectChanged":
             if let snapDict = body["snapshot"] as? [String: Any],
                let snap = parseSnapshot(snapDict),
@@ -923,12 +993,20 @@ extension WebViewManager: WKNavigationDelegate {
             }
         }
 
-        if navigationAction.navigationType == .linkActivated && !XHSURLClassifier.isAllowedInApp(url) {
-            if url.scheme == "http" || url.scheme == "https" {
-                NSWorkspace.shared.open(url)
+        if navigationAction.navigationType == .linkActivated {
+            if !XHSURLClassifier.isAllowedInApp(url) {
+                if url.scheme == "http" || url.scheme == "https" {
+                    NSWorkspace.shared.open(url)
+                }
+                decisionHandler(.cancel)
+                return
             }
-            decisionHandler(.cancel)
-            return
+            // Clicking an author's profile from Discover opens in secondaryWebView to preserve Discover scrollY!
+            if webView === exploreWebView && url.path.contains("/user/profile/") {
+                decisionHandler(.cancel)
+                openAuthorProfileInSecondary(url: url)
+                return
+            }
         }
 
         decisionHandler(.allow)
@@ -986,7 +1064,12 @@ extension WebViewManager: WKUIDelegate {
     ) -> WKWebView? {
         if let url = navigationAction.request.url {
             if XHSURLClassifier.isAllowedInApp(url) {
-                webView.load(navigationAction.request)
+                // Keep target="_blank" author profile links out of exploreWebView so Discover never reloads or jumps to top!
+                if webView === exploreWebView && url.path.contains("/user/profile/") {
+                    openAuthorProfileInSecondary(url: url)
+                } else {
+                    webView.load(navigationAction.request)
+                }
             } else if url.scheme == "http" || url.scheme == "https" {
                 NSWorkspace.shared.open(url)
             }

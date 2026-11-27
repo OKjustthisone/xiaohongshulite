@@ -56,7 +56,8 @@ struct RedNoteLiteApp: App {
                         Task { @MainActor in manager?.handleAppBecomeActive() }
                     }
                     appDelegate.onEscapePressed = { [weak state = appState] in
-                        guard let state, state.mainPane == .web, state.webManager.isInNoteDetail else {
+                        guard let state, state.mainPane == .web,
+                              (state.webManager.isInNoteDetail || state.webManager.activeSection == .authorProfile) else {
                             return false
                         }
                         state.webManager.goBackFromNote()

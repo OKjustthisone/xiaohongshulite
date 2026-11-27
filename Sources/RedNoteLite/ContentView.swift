@@ -531,21 +531,55 @@ struct ContentView: View {
 
     @ViewBuilder
     private var sectionHeaderContent: some View {
-        if webManager.canGoBack {
+        if webManager.activeSection == .authorProfile {
             Button {
                 webManager.goBackFromNote()
             } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .frame(width: 26, height: 26)
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .bold))
+                    Text("返回")
+                        .font(.system(size: 12.5, weight: .semibold))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.08), in: Capsule())
             }
             .buttonStyle(.plain)
+            .help("返回上一页（原浏览位置不刷新，支持右拉/ESC）")
+
+            Text(webManager.pageTitle.isEmpty ? webManager.activeSection.title : webManager.pageTitle)
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+
+            Spacer()
+
+            Button {
+                webManager.returnFromAuthorProfileToExplore(closeExploreModal: true)
+            } label: {
+                Label("回发现原位", systemImage: "safari")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("直接回到发现页之前的浏览位置（不刷新）")
+        } else {
+            if webManager.canGoBack {
+                Button {
+                    webManager.goBackFromNote()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(webManager.activeSection.title)
+                .font(.system(size: 14, weight: .semibold))
+
+            Spacer()
         }
-
-        Text(webManager.activeSection.title)
-            .font(.system(size: 14, weight: .semibold))
-
-        Spacer()
 
         if webManager.activeSection == .cloudCollections {
             Button {
